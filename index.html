@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3D UMAP with Scalar File Dropdown</title>
+  <style>
+    body { margin: 0; }
+    canvas { display: block; }
+    #dropdown {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 100;
+    }
+  </style>
+</head>
+<body>
+  <!-- Dropdown Menu -->
+  <select id="dropdown">
+    <!-- Options will be dynamically added here -->
+  </select>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.0/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.min.js"></script>
+
+  <script>
+    // Set up the scene, camera, and renderer
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // Initialize OrbitControls
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true; // Smooth movement
+    controls.dampingFactor = 0.05;
+    controls.screenSpacePanning = false; // Disable panning in screen space
+    controls.maxPolarAngle = Math.PI; // Allow full rotation vertically
+
+    let alphaMin = 0.0;
+    let alphaMax = 1.0;
+    let points; // Hold reference to the points in the scene
+
+    // Define the viridis colormap key points
+    const viridisColors = [
+      { t: 0.0, r: 68,  g: 1,   b: 84 },
+      { t: 0.25, r: 59,  g: 82,  b: 139 },
+      { t: 0.5, r: 33,  g: 145, b: 140 },
+      { t: 0.75, r: 93,  g: 201, b: 98 },
+      { t: 1.0, r: 253, g: 231, b: 36 }
+    ];
+
+    // Helper function to interpolate colors along the viridis colormap
+    function interpolateViridis(alpha) {
+      // Clamp alpha between alphaMin and alphaMax
+      alpha = Math.max(alphaMin, Math.min(alphaMax, alpha));
+      
+      const normalizedAlpha = (alpha - alphaMin) / (alphaMax - alphaMin);
+      for (let i = 0; i < viridisColors.length - 1; i++) {
+        const c1 = viridisColors[i];
+        const c2 = viridisColors[i + 1];
+        if (normalizedAlpha >= c1.t && normalizedAlpha <= c2.t) {
+          const t = (normalizedAlpha - c1.t) / (c2.t - c1.t);
+          const r = c1.r + t * (c2.r - c1.r);
+          const g = c1.g + t * (c2.g - c1.g);
+          const b = c1.b + t * (c2.b - c1.b);
+          return new THREE.Color(r / 255, g / 255, b / 255);
+        }
+      }
+      return new THREE.Color(1, 1, 1); // Fallback to white (shouldn't happen after clamping)
+    }
+
+    // Function to dynamically populate the dropdown with scalar files
+    function populateDropdown(scalarFiles) {
+      const dropdown = document.getElementById('dropdown');
+      dropdown.innerHTML = ''; // Clear previous options
+
+      scalarFiles.forEach(file => {
+        const option = document.createElement('option');
+        option.value = file;
+        option.text = file.split('.')[0]; // Remove the .csv extension
+        dropdown.appendChild(option);
+      });
+
+      // Set event listener for dropdown change
+      dropdown.addEventListener('change', () => {
+        loadScalarFile(`scalar/${dropdown.value}`); // Load the selected file
+      });
+
+      // Load the first scalar file by default after points are initialized
+      if (scalarFiles.length > 0) {
+        loadScalarFile(`scalar/${scalarFiles[0]}`); // Load the first file on page load
+      }
+    }
+
+    // Load scalar values from the selected file and update point colors
+    function loadScalarFile(scalarFile) {
+      console.log(`Loading scalar file: ${scalarFile}`);  // Debugging
+
+      fetch(scalarFile)
+        .then(response => response.text())
+        .then(csvText => {
+          Papa.parse(csvText, {
+            header: true,
+            dynamicTyping: true,
+            complete: function(results) {
+              const scalarData = results.data;
+              
+              console.log('Scalar data loaded:', scalarData);  // Debugging
+
+              // First two entries are alphaMin and alphaMax
+              alphaMin = scalarData[0].alpha;
+              alphaMax = scalarData[1].alpha;
+
+              console.log(`alphaMin: ${alphaMin}, alphaMax: ${alphaMax}`);  // Debugging
+
+              // Remaining rows contain scalar (alpha) values
+              const scalars = [];
+              for (let i = 2; i < scalarData.length; i++) {
+                if (Number.isFinite(scalarData[i].alpha)) {
+                  scalars.push(scalarData[i].alpha);
+                }
+              }
+
+              console.log('Scalars:', scalars);  // Debugging
+
+              // Update point colors based on new scalars
+              updatePointColors(scalars);
+            }
+          });
+        });
+    }
+
+    // Function to update point colors based on the new scalars
+    function updatePointColors(scalars) {
+      if (points && scalars.length === points.geometry.attributes.position.count) {
+        const colors = [];
+
+        for (let i = 0; i < scalars.length; i++) {
+          const color = interpolateViridis(scalars[i]);
+          colors.push(color.r, color.g, color.b);
+        }
+
+        // Update the color attribute in the points geometry
+        points.geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(colors), 3));
+        points.geometry.attributes.color.needsUpdate = true; // Ensure the update is reflected
+      }
+    }
+
+    // Plot the initial points (positions won't change)
+    function plotPoints(positions, meanPosition) {
+      const positionArray = [];
+      positions.forEach(([x, y, z]) => {
+        positionArray.push(x, y, z);
+      });
+
+      // Convert position arrays to Float32Array
+      const positionsFloatArray = new Float32Array(positionArray);
+
+      // Create geometry and set attributes for positions (initial colors will be empty)
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(positionsFloatArray, 3));
+      geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(positionArray.length), 3)); // Init with blank colors
+      geometry.setDrawRange(0, positionsFloatArray.length / 3);
+
+      // Compute bounding box and bounding sphere
+      geometry.computeBoundingSphere();
+      geometry.computeBoundingBox();
+
+      // Create the material for the points with vertex colors enabled
+      const material = new THREE.PointsMaterial({
+        size: 0.02,       // Set the point size smaller
+        transparent: true,
+        opacity: 0.7,    // Make the points semi-transparent
+        vertexColors: true // Enable vertex colors
+      });
+
+      // Create points and add them to the scene
+      points = new THREE.Points(geometry, material);
+      scene.add(points);
+
+      // Set the camera to look at the mean position
+      camera.lookAt(meanPosition.x, meanPosition.y, meanPosition.z);
+
+      // Position the camera to have a good view of the points
+      camera.position.set(meanPosition.x + 9, meanPosition.y + 9, meanPosition.z + 9);
+
+      // Set the target of OrbitControls to the mean position
+      controls.target.set(meanPosition.x, meanPosition.y, meanPosition.z);
+      controls.update(); // Update the controls to reflect the new target
+
+      // Now load the initial scalar file after points are initialized
+      const scalarFiles = ['sersic.csv', 'delta_f150w.csv','delta_f277w.csv'];
+      populateDropdown(scalarFiles); // Populate the dropdown with scalar files
+    }
+
+    // Initial load of positions and mean position
+    function loadDataAndPlot() {
+      Promise.all([loadMeanPosition(), loadPositions()]).then(([meanPosition, positions]) => {
+        plotPoints(positions, meanPosition); // Initialize the points first
+        animate();
+      });
+    }
+
+    // Animation loop
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update(); // Update the controls
+      renderer.render(scene, camera); // Render the scene
+    }
+
+    // Load mean position from "umap_mu.csv"
+    function loadMeanPosition() {
+      return fetch('umap_mu.csv')
+        .then(response => response.text())
+        .then(csvText => {
+          return new Promise((resolve) => {
+            Papa.parse(csvText, {
+              header: true,
+              dynamicTyping: true,
+              complete: function(results) {
+                const meanData = results.data[0];
+                resolve({ x: meanData.x, y: meanData.y, z: meanData.z });
+              }
+            });
+          });
+        });
+    }
+
+    // Load positions from "umap.csv"
+    function loadPositions() {
+      return fetch('umap.csv')
+        .then(response => response.text())
+        .then(csvText => {
+          return new Promise((resolve) => {
+            const positions = [];
+            Papa.parse(csvText, {
+              header: true,
+              dynamicTyping: true,
+              complete: function(results) {
+                results.data.forEach(row => {
+                  if (Number.isFinite(row.x) && Number.isFinite(row.y) && Number.isFinite(row.z)) {
+                    positions.push([row.x, row.y, row.z]);
+                  }
+                });
+                resolve(positions);
+              }
+            });
+          });
+        });
+    }
+
+    // Load initial data and plot points
+    loadDataAndPlot();
+  </script>
+</body>
+</html>
